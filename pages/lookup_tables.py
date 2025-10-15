@@ -27,7 +27,7 @@ def render_lookup_tables_page():
     # Type select with custom
     type_choice = st.selectbox(
         "Lookup table type (path param `{type}`)",
-        options=["payment_terms", "tax_codes", "central_bank_indicator", "custom"],
+        options=["tax_codes", "central_bank_indicator", "custom"],
         index=0,
         help="Choose a predefined type or 'custom' to provide your own.",
     )
