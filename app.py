@@ -10,7 +10,7 @@ from helpers import (
 
 from pages.invoices import render_invoices_page
 from pages.lookup_tables import render_lookup_tables_page
-
+from pages.suppliers import render_suppliers_page 
 
 def main():
     st.set_page_config(page_title="Hypatos Uploader", page_icon="🧾", layout="centered")
@@ -49,7 +49,7 @@ def main():
             options=[
                 "Upload Invoices",
                 "Lookup Tables",
-                # add more pages here later
+                 "Ingest Suppliers"
             ],
             index=0,
         )
@@ -60,6 +60,8 @@ def main():
         render_invoices_page(insert_path=ENRICHMENT_INSERT_PATH)
     elif page == "Lookup Tables":
         render_lookup_tables_page()
+    elif page == "Ingest Suppliers":
+        render_suppliers_page()
     else:
         st.info("Page not implemented yet.")
 
