@@ -4,14 +4,16 @@ import csv
 import json
 import math
 import re
+import zipfile
+import pandas as pd
+import requests
+import streamlit as st
+
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta
 from typing import Tuple, List, Dict
-
-import pandas as pd
-import requests
-import streamlit as st
+from io import BytesIO
 
 # =========================
 # --- Settings (shared)
@@ -599,3 +601,71 @@ def read_csv_grouped_by_external_id(file_like) -> Dict[str, list]:
             raise ValueError("Each row must have 'externalId' (invoice header id).")
         groups[ext].append(row)
     return groups
+
+
+# ---------- Supplier sample generators (SAP technical column names) ----------
+
+def _df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False)
+    return bio.getvalue()
+
+def make_supplier_samples_technical() -> dict[str, bytes]:
+    """
+    Returns a dict of filename -> file-bytes for:
+      LFA1_technical_sample.xlsx, LFB1_technical_sample.xlsx,
+      LFBK_technical_sample.xlsx, TIBAN_technical_sample.xlsx,
+      ADRC_technical_sample.xlsx, and supplier_technical_samples.zip
+    """
+    # LFA1
+    lfa1 = pd.DataFrame([
+        {"LIFNR":"0000123456","NAME1":"ACME GMBH","NAME2":"ACME EUROPE","NAME3":"ACME HOLDING","NAME4":"ACME INTL",
+         "STRAS":"HAUPTSTR. 1","ORT01":"BERLIN","PSTLZ":"10115","LAND1":"DE","STCD1":"1122334455","STCEG":"DE123456789","ADRNR":"0000001111"},
+        {"LIFNR":"0000654321","NAME1":"BETA SERVICES AG","NAME2":"BETA GROUP","NAME3":"BETA DE","NAME4":"BETA GLOBAL",
+         "STRAS":"MARKTWEG 5","ORT01":"MUENCHEN","PSTLZ":"80331","LAND1":"DE","STCD1":"5566778899","STCEG":"DE987654321","ADRNR":"0000002222"},
+    ])
+
+    # LFB1
+    lfb1 = pd.DataFrame([
+        {"LIFNR":"0000123456","BUKRS":"1000","ZTERM":"ZB30","SPERR":""},
+        {"LIFNR":"0000654321","BUKRS":"2000","ZTERM":"ZB14","SPERR":"X"},
+    ])
+
+    # LFBK
+    lfbk = pd.DataFrame([
+        {"LIFNR":"0000123456","BANKS":"DE","BANKL":"50010517","BANKN":"0001234567"},
+        {"LIFNR":"0000654321","BANKS":"DE","BANKL":"37040044","BANKN":"0007654321"},
+    ])
+
+    # TIBAN
+    tiban = pd.DataFrame([
+        {"BANKS":"DE","BANKL":"50010517","BANKN":"0001234567","IBAN":"DE44500105170001234567"},
+        {"BANKS":"DE","BANKL":"37040044","BANKN":"0007654321","IBAN":"DE89370400440007654321"},
+    ])
+
+    # ADRC
+    adrc = pd.DataFrame([
+        {"ADDRNUMBER":"0000001111","NAME1":"ACME GMBH","NAME2":"ACME EUROPE","NAME3":"ACME HOLDING","NAME4":"ACME INTERNATIONAL",
+         "CITY1":"BERLIN","POST_CODE1":"10115","STREET":"HAUPTSTR. 1","COUNTRY":"DE"},
+        {"ADDRNUMBER":"0000002222","NAME1":"BETA SERVICES AG","NAME2":"BETA GROUP","NAME3":"BETA DE","NAME4":"BETA GLOBAL",
+         "CITY1":"MUENCHEN","POST_CODE1":"80331","STREET":"MARKTWEG 5","COUNTRY":"DE"},
+    ])
+
+    files: dict[str, bytes] = {
+        "LFA1_technical_sample.xlsx": _df_to_xlsx_bytes(lfa1),
+        "LFB1_technical_sample.xlsx": _df_to_xlsx_bytes(lfb1),
+        "LFBK_technical_sample.xlsx": _df_to_xlsx_bytes(lfbk),
+        "TIBAN_technical_sample.xlsx": _df_to_xlsx_bytes(tiban),
+        "ADRC_technical_sample.xlsx": _df_to_xlsx_bytes(adrc),
+    }
+
+    # make ZIP in-memory
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    files["supplier_technical_samples.zip"] = zip_buf.getvalue()
+
+    return files
+
