@@ -11,7 +11,8 @@ from helpers import (
     load_table,
     bearer_headers,
     ensure_token,
-    SUPPLIER_INSERT_PATH,
+    make_supplier_samples_technical,     
+    SUPPLIER_INSERT_PATH
 )
 
 # -----------------------------
@@ -236,6 +237,43 @@ def render_suppliers_page():
     auth_path = st.session_state.get("auth_path", "")
     client_id = st.session_state.get("client_id", "")
     client_secret = st.session_state.get("client_secret", "")
+
+    # --- Sample files (download) ---
+    with st.expander("📥 Download supplier sample files", expanded=False):
+        samples = make_supplier_samples_technical()
+
+        st.download_button(
+            label="Download all (ZIP)",
+            data=samples["supplier_technical_samples.zip"],
+            file_name="supplier_technical_samples.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.download_button("LFA1 (XLSX)",
+                               data=samples["LFA1_technical_sample.xlsx"],
+                               file_name="LFA1_technical_sample.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("LFB1 (XLSX)",
+                               data=samples["LFB1_technical_sample.xlsx"],
+                               file_name="LFB1_technical_sample.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with c2:
+            st.download_button("LFBK (XLSX)",
+                               data=samples["LFBK_technical_sample.xlsx"],
+                               file_name="LFBK_technical_sample.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("TIBAN (XLSX)",
+                               data=samples["TIBAN_technical_sample.xlsx"],
+                               file_name="TIBAN_technical_sample.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with c3:
+            st.download_button("ADRC (XLSX)",
+                               data=samples["ADRC_technical_sample.xlsx"],
+                               file_name="ADRC_technical_sample.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.markdown("#### Upload files")
     c1, c2, c3 = st.columns(3)
