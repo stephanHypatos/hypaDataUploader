@@ -1,7 +1,7 @@
 # pages/suppliers.py
 import json
 import time
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import requests
@@ -17,11 +17,13 @@ from helpers import (
 # -----------------------------
 # Column resolution helpers
 # -----------------------------
-def pick(row: Dict, *candidates):
-    """Return the first non-empty column from the given row by trying candidate names."""
+def pick(row: Dict, *candidates) -> str:
+    """Return the first non-empty value found in row for any of the candidate column names."""
     for c in candidates:
-        if c in row and str(row[c]).strip() != "":
-            return str(row[c]).strip()
+        if c in row:
+            v = row[c]
+            if v is not None and str(v).strip() != "":
+                return str(v).strip()
     return ""
 
 def truthy(val: str) -> bool:
@@ -30,144 +32,196 @@ def truthy(val: str) -> bool:
     s = str(val).strip().lower()
     return s in ("x", "1", "true", "yes", "y", "ja")
 
+def prune_empty(obj):
+    if isinstance(obj, dict):
+        return {k: prune_empty(v) for k, v in obj.items() if v not in (None, "", [], {}, "nan", "NaN")}
+    if isinstance(obj, list):
+        return [prune_empty(x) for x in obj if x not in (None, "", [], {}, "nan", "NaN")]
+    return obj
+
 # -----------------------------
-# Builder
+# ADRC extraction
 # -----------------------------
-def build_supplier_payloads(lfa1: pd.DataFrame,
-                            lfb1: pd.DataFrame | None,
-                            lfbk: pd.DataFrame | None,
-                            tiban: pd.DataFrame | None) -> List[Dict]:
+def make_adrc_map(adrc: Optional[pd.DataFrame]) -> Dict[str, Dict]:
     """
-    Build one supplier payload per vendor (Kreditor/LIFNR).
-    Supports both German UI column names and SAP technical names.
+    Build a dict keyed by ADRC-ADDRNUMBER with:
+      - name2..name4 (uppercased like SAP technical)
+      - address fields as possible fallbacks
     """
-    # Normalize columns for easy access (case-sensitive preservation, but compare via a map)
-    def cols_map(df: pd.DataFrame) -> Dict[str, str]:
-        # map lowercase->actual for flexible lookup
-        return {c.lower(): c for c in df.columns}
+    if adrc is None or adrc.empty:
+        return {}
 
-    lfa1_cols = cols_map(lfa1)
-    lfb1_cols = cols_map(lfb1) if lfb1 is not None else {}
-    lfbk_cols = cols_map(lfbk) if lfbk is not None else {}
-    tiban_cols = cols_map(tiban) if tiban is not None else {}
+    # Build a case-insensitive column map
+    col = {c.lower(): c for c in adrc.columns}
 
-    # Create indexes/dicts keyed by vendor id
-    def vendor_key_from_row(row: Dict) -> str:
-        return pick(row,
-                    lfa1_cols.get("kreditor", "Kreditor"),
-                    lfa1_cols.get("lifnr", "LIFNR"),
-                    "Kreditor", "LIFNR")
+    k_addr = col.get("addrnumber", "ADDRNUMBER")
+    k_name2 = col.get("name2", "NAME2")
+    k_name3 = col.get("name3", "NAME3")
+    k_name4 = col.get("name4", "NAME4")
+    k_city  = col.get("city1", "CITY1")
+    k_post  = col.get("post_code1", "POST_CODE1")
+    k_street= col.get("street", "STREET")
+    k_ctry  = col.get("country", "COUNTRY")
+    k_name1 = col.get("name1", "NAME1")  # sometimes name1 in ADRC is also populated
 
-    # Build subsidiaries map from LFB1
+    out: Dict[str, Dict] = {}
+    for _, r in adrc.iterrows():
+        rd = r.to_dict()
+        addrnum = pick(rd, k_addr)
+        if not addrnum:
+            continue
+        out[addrnum] = {
+            "NAME1": pick(rd, k_name1),
+            "NAME2": pick(rd, k_name2),
+            "NAME3": pick(rd, k_name3),
+            "NAME4": pick(rd, k_name4),
+            "STREET": pick(rd, k_street),
+            "CITY1": pick(rd, k_city),
+            "POST_CODE1": pick(rd, k_post),
+            "COUNTRY": pick(rd, k_ctry),
+        }
+    return out
+
+# -----------------------------
+# Core builder
+# -----------------------------
+def build_supplier_payloads(
+    lfa1: pd.DataFrame,
+    lfb1: Optional[pd.DataFrame],
+    lfbk: Optional[pd.DataFrame],
+    tiban: Optional[pd.DataFrame],
+    adrc: Optional[pd.DataFrame],
+    alt_name_source: str = "LFA1_FIRST",  # "LFA1_FIRST" or "ADRC_FIRST"
+) -> List[Dict]:
+    """
+    Build one supplier payload per vendor (LIFNR). Accepts SAP technical columns.
+    alt_name_source: choose whether alternative names come primarily from LFA1 or ADRC.
+    """
+    # column maps (case-insensitive)
+    def cols_map(df: Optional[pd.DataFrame]) -> Dict[str, str]:
+        return {} if df is None else {c.lower(): c for c in df.columns}
+
+    c_lfa1 = cols_map(lfa1)
+    c_lfb1 = cols_map(lfb1)
+    c_lfbk = cols_map(lfbk)
+    c_tiban = cols_map(tiban)
+
+    # --- subsidiaries from LFB1 ---
     subs_map: Dict[str, List[Dict]] = {}
-    if lfb1 is not None and len(lfb1):
+    if lfb1 is not None and not lfb1.empty:
         for _, r in lfb1.iterrows():
-            row = r.to_dict()
-
-            lifnr = pick(row,
-                         lfb1_cols.get("kreditor", "Kreditor"),
-                         lfb1_cols.get("lifnr", "LIFNR"),
-                         "Kreditor", "LIFNR")
+            rd = r.to_dict()
+            lifnr = pick(rd, c_lfb1.get("lifnr", "LIFNR"))
             if not lifnr:
                 continue
-
-            bukr = pick(row, lfb1_cols.get("bukr", "BuKr"), lfb1_cols.get("bukrs", "BUKRS"), "BuKr", "BUKRS")
-            zbed = pick(row, lfb1_cols.get("zbed", "Zbed"), lfb1_cols.get("zterm", "ZTERM"), "Zbed", "ZTERM")
-            block = pick(row, lfb1_cols.get("s", "S"), lfb1_cols.get("sperr", "SPERR"), "S", "SPERR")
-            subsidiary = {
-                "externalCompanyId": bukr or None,
-                "paymentTerms": {"paymentTermKey": zbed} if zbed else None,
-                "blockedForPayment": truthy(block),
+            bukrs = pick(rd, c_lfb1.get("bukrs", "BUKRS"))
+            zterm = pick(rd, c_lfb1.get("zterm", "ZTERM"))
+            sperr = pick(rd, c_lfb1.get("sperr", "SPERR"))
+            item = {
+                "externalCompanyId": bukrs or None,
+                "blockedForPayment": truthy(sperr),
             }
-            # prune None fields lightly
-            if subsidiary["paymentTerms"] is None:
-                subsidiary.pop("paymentTerms")
-            if not lifnr in subs_map:
-                subs_map[lifnr] = []
-            subs_map[lifnr].append(subsidiary)
+            if zterm:
+                item["paymentTerms"] = {"paymentTermKey": zterm}
+            item = prune_empty(item)
+            subs_map.setdefault(lifnr, []).append(item)
 
-    # Build bank accounts map from LFBK + TIBAN (left join)
-    iban_index = {}
-    if tiban is not None and len(tiban):
+    # --- TIBAN lookup (BANKS,BANKL,BANKN -> IBAN) ---
+    iban_index: Dict[Tuple[str, str, str], str] = {}
+    if tiban is not None and not tiban.empty:
         for _, r in tiban.iterrows():
-            row = r.to_dict()
-            land = pick(row, tiban_cols.get("land", "Land"), tiban_cols.get("banks", "BANKS"), "Land", "BANKS")
-            bank_key = pick(row, tiban_cols.get("bankschlüssel", "Bankschlüssel"), tiban_cols.get("bankl", "BANKL"),
-                            "Bankschlüssel", "BANKL")
-            acct = pick(row, tiban_cols.get("bankkonto", "Bankkonto"), tiban_cols.get("bankn", "BANKN"),
-                        "Bankkonto", "BANKN")
-            iban = pick(row, tiban_cols.get("iban", "IBAN"), "IBAN")
-            if land and bank_key and acct and iban:
-                iban_index[(land, bank_key, acct)] = iban
+            rd = r.to_dict()
+            banks = pick(rd, c_tiban.get("banks", "BANKS"))
+            bankl = pick(rd, c_tiban.get("bankl", "BANKL"))
+            bankn = pick(rd, c_tiban.get("bankn", "BANKN"))
+            iban  = pick(rd, c_tiban.get("iban",  "IBAN"))
+            if banks and bankl and bankn and iban:
+                iban_index[(banks, bankl, bankn)] = iban
 
+    # --- bank accounts from LFBK (+ TIBAN join) ---
     bank_map: Dict[str, List[Dict]] = {}
-    if lfbk is not None and len(lfbk):
+    if lfbk is not None and not lfbk.empty:
         for _, r in lfbk.iterrows():
-            row = r.to_dict()
-            lifnr = pick(row,
-                         lfbk_cols.get("kreditor", "Kreditor"),
-                         lfbk_cols.get("lifnr", "LIFNR"),
-                         "Kreditor", "LIFNR")
+            rd = r.to_dict()
+            lifnr = pick(rd, c_lfbk.get("lifnr", "LIFNR"))
             if not lifnr:
                 continue
-
-            land = pick(row, lfbk_cols.get("land", "Land"), lfbk_cols.get("banks", "BANKS"), "Land", "BANKS")
-            bank_key = pick(row, lfbk_cols.get("bankschlüssel", "Bankschlüssel"), lfbk_cols.get("bankl", "BANKL"),
-                            "Bankschlüssel", "BANKL")
-            acct = pick(row, lfbk_cols.get("bankkonto", "Bankkonto"), lfbk_cols.get("bankn", "BANKN"),
-                        "Bankkonto", "BANKN")
-
-            external_id = "".join([land, bank_key, acct]) if (land and bank_key and acct) else None
-            iban = iban_index.get((land, bank_key, acct)) if (land and bank_key and acct) else None
-
+            banks = pick(rd, c_lfbk.get("banks", "BANKS"))
+            bankl = pick(rd, c_lfbk.get("bankl", "BANKL"))
+            bankn = pick(rd, c_lfbk.get("bankn", "BANKN"))
+            external_id = f"{banks}{bankl}{bankn}" if banks and bankl and bankn else None
+            iban = iban_index.get((banks, bankl, bankn))
             entry = {
                 "externalId": external_id,
-                "bankAccountNumber": acct or None,
+                "bankAccountNumber": bankn or None,
                 "iban": iban or None,
             }
-            # prune Nones
-            entry = {k: v for k, v in entry.items() if v is not None}
-            if not lifnr in bank_map:
-                bank_map[lifnr] = []
-            bank_map[lifnr].append(entry)
+            entry = prune_empty(entry)
+            bank_map.setdefault(lifnr, []).append(entry)
 
-    # Build final supplier payloads from LFA1
+    # --- ADRC map (optional) ---
+    adrc_map = make_adrc_map(adrc)
+
+    # --- final suppliers from LFA1 ---
     payloads: List[Dict] = []
     for _, r in lfa1.iterrows():
-        row = r.to_dict()
-
-        lifnr = pick(row, lfa1_cols.get("kreditor", "Kreditor"), lfa1_cols.get("lifnr", "LIFNR"), "Kreditor", "LIFNR")
+        rd = r.to_dict()
+        lifnr   = pick(rd, c_lfa1.get("lifnr", "LIFNR"))
         if not lifnr:
-            # vendor id is required
             continue
 
-        company_name = pick(row, lfa1_cols.get("name 1", "Name 1"), lfa1_cols.get("name1", "NAME1"), "Name 1", "NAME1")
-        address = pick(row, lfa1_cols.get("straße", "Straße"), lfa1_cols.get("stras", "STRAS"), "Straße", "STRAS")
-        city = pick(row, lfa1_cols.get("ort", "Ort"), lfa1_cols.get("ort01", "ORT01"), "Ort", "ORT01")
-        postcode = pick(row, lfa1_cols.get("postleitz.", "Postleitz."), lfa1_cols.get("pstlz", "PSTLZ"),
-                        "Postleitz.", "PSTLZ")
-        country = pick(row, lfa1_cols.get("lnd", "Lnd"), lfa1_cols.get("land1", "LAND1"), "Lnd", "LAND1")
+        # Base names/addr from LFA1
+        name1  = pick(rd, c_lfa1.get("name1", "NAME1"))
+        name2  = pick(rd, c_lfa1.get("name2", "NAME2"))
+        name3  = pick(rd, c_lfa1.get("name3", "NAME3"))
+        name4  = pick(rd, c_lfa1.get("name4", "NAME4"))
+        stras  = pick(rd, c_lfa1.get("stras", "STRAS"))
+        city   = pick(rd, c_lfa1.get("ort01", "ORT01"))
+        post   = pick(rd, c_lfa1.get("pstlz", "PSTLZ"))
+        ctry   = pick(rd, c_lfa1.get("land1", "LAND1"))
+        stcd1  = pick(rd, c_lfa1.get("stcd1", "STCD1"))
+        stceg  = pick(rd, c_lfa1.get("stceg", "STCEG"))
+        adrnr  = pick(rd, c_lfa1.get("adrnr", "ADRNR"))
 
-        tax_no = pick(row, lfa1_cols.get("steuernummer 1", "Steuernummer 1"), lfa1_cols.get("stcd1", "STCD1"),
-                      "Steuernummer 1", "STCD1")
-        vat_id = pick(row, lfa1_cols.get("umsatzsteuer-id.nr", "Umsatzsteuer-Id.Nr"),
-                      lfa1_cols.get("stceg", "STCEG"), "Umsatzsteuer-Id.Nr", "STCEG")
+        # ADRC fallbacks / alternates
+        a = adrc_map.get(adrnr) if adrnr else None
+        if alt_name_source == "ADRC_FIRST" and a:
+            alt1 = a.get("NAME2") or name2
+            alt2 = a.get("NAME3") or name3
+            alt3 = a.get("NAME4") or name4
+        else:
+            # LFA1 first, fallback ADRC
+            alt1 = name2 or (a.get("NAME2") if a else "")
+            alt2 = name3 or (a.get("NAME3") if a else "")
+            alt3 = name4 or (a.get("NAME4") if a else "")
+
+        # Address fallback from ADRC if LFA1 is empty
+        if a:
+            stras = stras or a.get("STREET")
+            city  = city  or a.get("CITY1")
+            post  = post  or a.get("POST_CODE1")
+            ctry  = ctry  or a.get("COUNTRY")
+            # also sometimes ADRC.NAME1 is "nicer" – do not override LFA1.NAME1 unless empty
+            name1 = name1 or a.get("NAME1")
 
         payload = {
             "vendorId": lifnr,
-            "companyName": company_name or None,
-            "address": address or None,
+            "companyName": name1 or None,
+            "nameAlternative1": alt1 or None,
+            "nameAlternative2": alt2 or None,
+            "nameAlternative3": alt3 or None,
+            # you can add nameAlternative4 from another source if needed
+            "address": stras or None,
             "city": city or None,
-            "postcode": postcode or None,
-            "country": country or None,
-            "taxIds": [tax_no] if tax_no else [],
-            "vatIds": [vat_id] if vat_id else [],
+            "postcode": post or None,
+            "country": ctry or None,
+            "taxIds": [stcd1] if stcd1 else [],
+            "vatIds": [stceg] if stceg else [],
             "supplierSubsidiaries": subs_map.get(lifnr, []),
             "supplierBankAccounts": bank_map.get(lifnr, []),
         }
-        # prune None/empty
-        payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
-        payloads.append(payload)
+
+        payloads.append(prune_empty(payload))
 
     return payloads
 
@@ -175,7 +229,7 @@ def build_supplier_payloads(lfa1: pd.DataFrame,
 # Page UI
 # -----------------------------
 def render_suppliers_page():
-    st.caption("Upload SAP vendor master exports (LFA1, LFB1, LFBK, TIBAN) → map → POST to insert suppliers")
+    st.caption("Upload SAP vendor master exports (LFA1, LFB1, LFBK, TIBAN, ADRC) → map → POST to insert suppliers")
 
     # Shared config from session
     base_url = st.session_state.get("base_url", "")
@@ -184,13 +238,24 @@ def render_suppliers_page():
     client_secret = st.session_state.get("client_secret", "")
 
     st.markdown("#### Upload files")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         lfa1_file = st.file_uploader("LFA1 (required)", type=["xlsx", "xls", "csv"], key="lfa1")
         lfb1_file = st.file_uploader("LFB1 (subsidiaries)", type=["xlsx", "xls", "csv"], key="lfb1")
     with c2:
         lfbk_file = st.file_uploader("LFBK (bank accounts)", type=["xlsx", "xls", "csv"], key="lfbk")
         tiban_file = st.file_uploader("TIBAN (IBAN registry)", type=["xlsx", "xls", "csv"], key="tiban")
+    with c3:
+        adrc_file = st.file_uploader("ADRC (address/alt names)", type=["xlsx", "xls", "csv"], key="adrc")
+
+    st.markdown("#### Options")
+    alt_source = st.radio(
+        "Alternative name source priority",
+        options=["LFA1 first (fallback ADRC)", "ADRC first (fallback LFA1)"],
+        index=0,
+        help="Controls which table provides NAME2/NAME3/NAME4 first for nameAlternative1..3.",
+    )
+    alt_source_key = "LFA1_FIRST" if alt_source.startswith("LFA1") else "ADRC_FIRST"
 
     dry_run = st.toggle("Dry run (do not POST, just preview JSON)", value=True)
     throttle_ms = st.slider("Throttle between requests (ms)", 0, 2000, 0, step=50)
@@ -199,20 +264,22 @@ def render_suppliers_page():
         st.info("LFA1 is required to build supplier headers.")
         return
 
-    # Load dataframes (read as strings; preserves leading zeros)
+    # Load tables (read as strings; preserves leading zeros)
     lfa1 = load_table(lfa1_file)
     lfb1 = load_table(lfb1_file) if lfb1_file else None
     lfbk = load_table(lfbk_file) if lfbk_file else None
     tiban = load_table(tiban_file) if tiban_file else None
+    adrc  = load_table(adrc_file)  if adrc_file  else None
 
     st.markdown("#### Previews")
     st.write("LFA1:", lfa1.head(10))
     if lfb1 is not None: st.write("LFB1:", lfb1.head(10))
     if lfbk is not None: st.write("LFBK:", lfbk.head(10))
     if tiban is not None: st.write("TIBAN:", tiban.head(10))
+    if adrc  is not None: st.write("ADRC:", adrc.head(10))
 
     # Build payloads
-    payloads = build_supplier_payloads(lfa1, lfb1, lfbk, tiban)
+    payloads = build_supplier_payloads(lfa1, lfb1, lfbk, tiban, adrc, alt_name_source=alt_source_key)
 
     st.markdown("#### Payload preview")
     preview_n = min(5, len(payloads))
