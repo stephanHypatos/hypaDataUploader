@@ -1,6 +1,7 @@
 # pages/suppliers.py
 import json
 import time
+import re
 from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
@@ -11,15 +12,14 @@ from helpers import (
     load_table,
     bearer_headers,
     ensure_token,
-    make_supplier_samples_technical,     
-    SUPPLIER_INSERT_PATH
+    make_supplier_samples_technical,
+    SUPPLIER_INSERT_PATH,
 )
 
 # -----------------------------
-# Column resolution helpers
+# Small helpers
 # -----------------------------
 def pick(row: Dict, *candidates) -> str:
-    """Return the first non-empty value found in row for any of the candidate column names."""
     for c in candidates:
         if c in row:
             v = row[c]
@@ -44,18 +44,11 @@ def prune_empty(obj):
 # ADRC extraction
 # -----------------------------
 def make_adrc_map(adrc: Optional[pd.DataFrame]) -> Dict[str, Dict]:
-    """
-    Build a dict keyed by ADRC-ADDRNUMBER with:
-      - name2..name4 (uppercased like SAP technical)
-      - address fields as possible fallbacks
-    """
     if adrc is None or adrc.empty:
         return {}
-
-    # Build a case-insensitive column map
     col = {c.lower(): c for c in adrc.columns}
-
     k_addr = col.get("addrnumber", "ADDRNUMBER")
+    k_name1 = col.get("name1", "NAME1")
     k_name2 = col.get("name2", "NAME2")
     k_name3 = col.get("name3", "NAME3")
     k_name4 = col.get("name4", "NAME4")
@@ -63,7 +56,6 @@ def make_adrc_map(adrc: Optional[pd.DataFrame]) -> Dict[str, Dict]:
     k_post  = col.get("post_code1", "POST_CODE1")
     k_street= col.get("street", "STREET")
     k_ctry  = col.get("country", "COUNTRY")
-    k_name1 = col.get("name1", "NAME1")  # sometimes name1 in ADRC is also populated
 
     out: Dict[str, Dict] = {}
     for _, r in adrc.iterrows():
@@ -84,6 +76,33 @@ def make_adrc_map(adrc: Optional[pd.DataFrame]) -> Dict[str, Dict]:
     return out
 
 # -----------------------------
+# Multi-ID helpers (VAT / TAX)
+# -----------------------------
+_SPLIT_RE = re.compile(r"[,\;\|\s]+")
+
+def _split_multi(val: str) -> list[str]:
+    if not val:
+        return []
+    return [p.strip() for p in _SPLIT_RE.split(str(val)) if p and p.strip()]
+
+def _collect_ids_from_row(row: dict, colmap: dict[str, str], patterns: list[str]) -> list[str]:
+    """
+    Collect multiple IDs from a row by:
+      - scanning any LFA1 column whose LOWER name matches ANY regex in patterns
+      - splitting each matched cell on common delimiters
+      - dedupe while preserving order
+    """
+    out: list[str] = []
+    seen = set()
+    for lower_name, actual in colmap.items():
+        if any(re.fullmatch(pat, lower_name) for pat in patterns):
+            for v in _split_multi(row.get(actual, "")):
+                if v not in seen:
+                    seen.add(v)
+                    out.append(v)
+    return out
+
+# -----------------------------
 # Core builder
 # -----------------------------
 def build_supplier_payloads(
@@ -93,18 +112,13 @@ def build_supplier_payloads(
     tiban: Optional[pd.DataFrame],
     adrc: Optional[pd.DataFrame],
     alt_name_source: str = "LFA1_FIRST",
-    global_external_client_id: str | None = None,
-    lifnr_to_client: Dict[str, str] | None = None,
-    bukrs_to_client: Dict[str, str] | None = None,
+    external_client_id: Optional[str] = None,
 ) -> List[Dict]:
-    lifnr_to_client = lifnr_to_client or {}
-    bukrs_to_client = bukrs_to_client or {}
-    
     """
     Build one supplier payload per vendor (LIFNR). Accepts SAP technical columns.
-    alt_name_source: choose whether alternative names come primarily from LFA1 or ADRC.
+    Uses externalId (LIFNR). Adds optional global externalClientId.
     """
-    # column maps (case-insensitive)
+    # Column maps (case-insensitive)
     def cols_map(df: Optional[pd.DataFrame]) -> Dict[str, str]:
         return {} if df is None else {c.lower(): c for c in df.columns}
 
@@ -130,8 +144,7 @@ def build_supplier_payloads(
             }
             if zterm:
                 item["paymentTerms"] = {"paymentTermKey": zterm}
-            item = prune_empty(item)
-            subs_map.setdefault(lifnr, []).append(item)
+            subs_map.setdefault(lifnr, []).append(prune_empty(item))
 
     # --- TIBAN lookup (BANKS,BANKL,BANKN -> IBAN) ---
     iban_index: Dict[Tuple[str, str, str], str] = {}
@@ -163,74 +176,69 @@ def build_supplier_payloads(
                 "bankAccountNumber": bankn or None,
                 "iban": iban or None,
             }
-            entry = prune_empty(entry)
-            bank_map.setdefault(lifnr, []).append(entry)
+            bank_map.setdefault(lifnr, []).append(prune_empty(entry))
 
     # --- ADRC map (optional) ---
     adrc_map = make_adrc_map(adrc)
+
+    # --- patterns for multi-ID collection in LFA1 ---
+    vat_patterns = [
+        r"stceg(_?\d+)?",       # STCEG, STCEG2...
+        r"vat[_\-]?id",         # VAT_ID, VAT-ID
+        r"vat[_\-]?number",     # VAT_NUMBER
+        r"vatno",               # VATNO
+    ]
+    tax_patterns = [
+        r"stcd(_?\d+)?",        # STCD, STCD1..5
+        r"tax[_\-]?id",
+        r"tax[_\-]?number",
+        r"taxno",
+    ]
 
     # --- final suppliers from LFA1 ---
     payloads: List[Dict] = []
     for _, r in lfa1.iterrows():
         rd = r.to_dict()
-        lifnr   = pick(rd, c_lfa1.get("lifnr", "LIFNR"))
+        lifnr = pick(rd, c_lfa1.get("lifnr", "LIFNR"))
         if not lifnr:
             continue
 
         # Base names/addr from LFA1
-        name1  = pick(rd, c_lfa1.get("name1", "NAME1"))
-        name2  = pick(rd, c_lfa1.get("name2", "NAME2"))
-        name3  = pick(rd, c_lfa1.get("name3", "NAME3"))
-        name4  = pick(rd, c_lfa1.get("name4", "NAME4"))
-        stras  = pick(rd, c_lfa1.get("stras", "STRAS"))
-        city   = pick(rd, c_lfa1.get("ort01", "ORT01"))
-        post   = pick(rd, c_lfa1.get("pstlz", "PSTLZ"))
-        ctry   = pick(rd, c_lfa1.get("land1", "LAND1"))
-        stcd1  = pick(rd, c_lfa1.get("stcd1", "STCD1"))
-        stceg  = pick(rd, c_lfa1.get("stceg", "STCEG"))
-        adrnr  = pick(rd, c_lfa1.get("adrnr", "ADRNR"))
+        name1 = pick(rd, c_lfa1.get("name1", "NAME1"))
+        name2 = pick(rd, c_lfa1.get("name2", "NAME2"))
+        name3 = pick(rd, c_lfa1.get("name3", "NAME3"))
+        name4 = pick(rd, c_lfa1.get("name4", "NAME4"))
+        stras = pick(rd, c_lfa1.get("stras", "STRAS"))
+        city  = pick(rd, c_lfa1.get("ort01", "ORT01"))
+        post  = pick(rd, c_lfa1.get("pstlz", "PSTLZ"))
+        ctry  = pick(rd, c_lfa1.get("land1", "LAND1"))
+        adrnr = pick(rd, c_lfa1.get("adrnr", "ADRNR"))
 
-        # ADRC fallbacks / alternates
+        # MULTI VAT/TAX IDs
+        vat_ids = _collect_ids_from_row(rd, c_lfa1, vat_patterns)
+        tax_ids = _collect_ids_from_row(rd, c_lfa1, tax_patterns)
+
+        # ADRC fallbacks / alt names
         a = adrc_map.get(adrnr) if adrnr else None
-        if alt_name_source == "ADRC_FIRST" and a:
+        if a and alt_name_source == "ADRC_FIRST":
             alt1 = a.get("NAME2") or name2
             alt2 = a.get("NAME3") or name3
             alt3 = a.get("NAME4") or name4
         else:
-            # LFA1 first, fallback ADRC
             alt1 = name2 or (a.get("NAME2") if a else "")
             alt2 = name3 or (a.get("NAME3") if a else "")
             alt3 = name4 or (a.get("NAME4") if a else "")
 
-        # Address fallback from ADRC if LFA1 is empty
         if a:
             stras = stras or a.get("STREET")
             city  = city  or a.get("CITY1")
             post  = post  or a.get("POST_CODE1")
             ctry  = ctry  or a.get("COUNTRY")
-            # also sometimes ADRC.NAME1 is "nicer" – do not override LFA1.NAME1 unless empty
             name1 = name1 or a.get("NAME1")
 
-        # Resolve externalClientId priority:
-        # 1) global value (if provided)
-        # 2) mapping by LIFNR (if present)
-        # 3) mapping by any subsidiary BUKRS (first hit) (if present)
-        resolved_ecid = None
-        if global_external_client_id:
-            resolved_ecid = global_external_client_id.strip()
-        elif lifnr in lifnr_to_client:
-            resolved_ecid = lifnr_to_client[lifnr]
-        else:
-            # check a subsidiary BUKRS mapping (first match)
-            for sub in subs_map.get(lifnr, []):
-                bukrs = str(sub.get("externalCompanyId","")).strip()
-                if bukrs and bukrs in bukrs_to_client:
-                    resolved_ecid = bukrs_to_client[bukrs]
-                    break
-
         payload = {
-            "externalId": lifnr,
-            "externalClientId": resolved_ecid or None,   # <-- new
+            "externalId": lifnr,                         # <-- externalId (from LIFNR)
+            "externalClientId": (external_client_id or None),
             "companyName": name1 or None,
             "nameAlternative1": alt1 or None,
             "nameAlternative2": alt2 or None,
@@ -239,20 +247,13 @@ def build_supplier_payloads(
             "city": city or None,
             "postcode": post or None,
             "country": ctry or None,
-            "taxIds": tax_ids,
-            "vatIds": vat_ids,
+            "taxIds": tax_ids,                           # <-- now lists
+            "vatIds": vat_ids,                           # <-- now lists
             "supplierSubsidiaries": subs_map.get(lifnr, []),
             "supplierBankAccounts": bank_map.get(lifnr, []),
         }
 
-
-        payloads = build_supplier_payloads(
-                    lfa1, lfb1, lfbk, tiban, adrc,
-                    alt_name_source=alt_source_key,
-                    global_external_client_id=global_external_client_id,
-                    lifnr_to_client=lifnr_to_client,
-                    bukrs_to_client=bukrs_to_client,
-                    )
+        payloads.append(prune_empty(payload))
 
     return payloads
 
@@ -262,7 +263,7 @@ def build_supplier_payloads(
 def render_suppliers_page():
     st.caption("Upload SAP vendor master exports (LFA1, LFB1, LFBK, TIBAN, ADRC) → map → POST to insert suppliers")
 
-    # Shared config from session
+    # Shared config
     base_url = st.session_state.get("base_url", "")
     auth_path = st.session_state.get("auth_path", "")
     client_id = st.session_state.get("client_id", "")
@@ -271,7 +272,6 @@ def render_suppliers_page():
     # --- Sample files (download) ---
     with st.expander("📥 Download supplier sample files", expanded=False):
         samples = make_supplier_samples_technical()
-
         st.download_button(
             label="Download all (ZIP)",
             data=samples["supplier_technical_samples.zip"],
@@ -279,29 +279,23 @@ def render_suppliers_page():
             mime="application/zip",
             use_container_width=True,
         )
-
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.download_button("LFA1 (XLSX)",
-                               data=samples["LFA1_technical_sample.xlsx"],
+            st.download_button("LFA1 (XLSX)", data=samples["LFA1_technical_sample.xlsx"],
                                file_name="LFA1_technical_sample.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.download_button("LFB1 (XLSX)",
-                               data=samples["LFB1_technical_sample.xlsx"],
+            st.download_button("LFB1 (XLSX)", data=samples["LFB1_technical_sample.xlsx"],
                                file_name="LFB1_technical_sample.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with c2:
-            st.download_button("LFBK (XLSX)",
-                               data=samples["LFBK_technical_sample.xlsx"],
+            st.download_button("LFBK (XLSX)", data=samples["LFBK_technical_sample.xlsx"],
                                file_name="LFBK_technical_sample.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.download_button("TIBAN (XLSX)",
-                               data=samples["TIBAN_technical_sample.xlsx"],
+            st.download_button("TIBAN (XLSX)", data=samples["TIBAN_technical_sample.xlsx"],
                                file_name="TIBAN_technical_sample.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         with c3:
-            st.download_button("ADRC (XLSX)",
-                               data=samples["ADRC_technical_sample.xlsx"],
+            st.download_button("ADRC (XLSX)", data=samples["ADRC_technical_sample.xlsx"],
                                file_name="ADRC_technical_sample.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -325,6 +319,14 @@ def render_suppliers_page():
     )
     alt_source_key = "LFA1_FIRST" if alt_source.startswith("LFA1") else "ADRC_FIRST"
 
+    # Global externalClientId (optional)
+    st.markdown("#### External Client ID")
+    external_client_id = st.text_input(
+        "Global externalClientId (optional)",
+        placeholder="EXTERNAL_CLIENT_ID",
+        help="If provided, this value will be set on every supplier payload."
+    )
+
     dry_run = st.toggle("Dry run (do not POST, just preview JSON)", value=True)
     throttle_ms = st.slider("Throttle between requests (ms)", 0, 2000, 0, step=50)
 
@@ -332,56 +334,13 @@ def render_suppliers_page():
         st.info("LFA1 is required to build supplier headers.")
         return
 
-    # Load tables (read as strings; preserves leading zeros)
+    # Load tables
     lfa1 = load_table(lfa1_file)
     lfb1 = load_table(lfb1_file) if lfb1_file else None
     lfbk = load_table(lfbk_file) if lfbk_file else None
     tiban = load_table(tiban_file) if tiban_file else None
     adrc  = load_table(adrc_file)  if adrc_file  else None
 
-    # --- External Client ID options ---
-    st.markdown("#### External Client ID")
-    ec_col1, ec_col2 = st.columns([1,1])
-    with ec_col1:
-        global_external_client_id = st.text_input(
-            "Global externalClientId (optional)",
-            placeholder="EXTERNAL_CLIENT_ID",
-            help="If provided, this value will be set on every supplier payload."
-        )
-    with ec_col2:
-        mapping_file = st.file_uploader(
-            "Optional mapping file (CSV/XLSX)",
-            type=["csv","xlsx","xls"],
-            help="Two-column file to map either LIFNR→externalClientId or BUKRS→externalClientId."
-        )
-        mapping_key_type = st.selectbox(
-            "Mapping key type",
-            options=["LIFNR", "BUKRS"],
-            index=0,
-            help="Choose whether your mapping file keys by vendor (LIFNR) or company code (BUKRS)."
-        )
-
-    # Load mapping (if any)
-    lifnr_to_client = {}
-    bukrs_to_client = {}
-    if mapping_file is not None:
-        mdf = load_table(mapping_file)
-        # Try to locate columns robustly
-        cols = {c.lower(): c for c in mdf.columns}
-        key_col = cols.get(mapping_key_type.lower(), mapping_key_type)
-        val_col = cols.get("externalclientid", "externalClientId")
-
-        if key_col not in mdf.columns or val_col not in mdf.columns:
-            st.error(f"Mapping file must contain columns '{mapping_key_type}' and 'externalClientId'. Found: {list(mdf.columns)}")
-        else:
-            if mapping_key_type == "LIFNR":
-                lifnr_to_client = {str(r[key_col]).strip(): str(r[val_col]).strip()
-                                   for _, r in mdf.iterrows() if str(r.get(val_col,"")).strip()}
-            else:
-                bukrs_to_client = {str(r[key_col]).strip(): str(r[val_col]).strip()
-                                   for _, r in mdf.iterrows() if str(r.get(val_col,"")).strip()}
-
-    
     st.markdown("#### Previews")
     st.write("LFA1:", lfa1.head(10))
     if lfb1 is not None: st.write("LFB1:", lfb1.head(10))
@@ -389,8 +348,12 @@ def render_suppliers_page():
     if tiban is not None: st.write("TIBAN:", tiban.head(10))
     if adrc  is not None: st.write("ADRC:", adrc.head(10))
 
-    # Build payloads
-    payloads = build_supplier_payloads(lfa1, lfb1, lfbk, tiban, adrc, alt_name_source=alt_source_key)
+    # Build payloads (now passes external_client_id)
+    payloads = build_supplier_payloads(
+        lfa1, lfb1, lfbk, tiban, adrc,
+        alt_name_source=alt_source_key,
+        external_client_id=external_client_id or None,
+    )
 
     st.markdown("#### Payload preview")
     preview_n = min(5, len(payloads))
