@@ -206,7 +206,8 @@ def build_supplier_payloads(
             name1 = name1 or a.get("NAME1")
 
         payload = {
-            "vendorId": lifnr,
+            "externalId": lifnr,
+            "code": lifnr,
             "companyName": name1 or None,
             "nameAlternative1": alt1 or None,
             "nameAlternative2": alt2 or None,
