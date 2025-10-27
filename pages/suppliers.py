@@ -92,8 +92,14 @@ def build_supplier_payloads(
     lfbk: Optional[pd.DataFrame],
     tiban: Optional[pd.DataFrame],
     adrc: Optional[pd.DataFrame],
-    alt_name_source: str = "LFA1_FIRST",  # "LFA1_FIRST" or "ADRC_FIRST"
+    alt_name_source: str = "LFA1_FIRST",
+    global_external_client_id: str | None = None,
+    lifnr_to_client: Dict[str, str] | None = None,
+    bukrs_to_client: Dict[str, str] | None = None,
 ) -> List[Dict]:
+    lifnr_to_client = lifnr_to_client or {}
+    bukrs_to_client = bukrs_to_client or {}
+    
     """
     Build one supplier payload per vendor (LIFNR). Accepts SAP technical columns.
     alt_name_source: choose whether alternative names come primarily from LFA1 or ADRC.
@@ -205,25 +211,48 @@ def build_supplier_payloads(
             # also sometimes ADRC.NAME1 is "nicer" – do not override LFA1.NAME1 unless empty
             name1 = name1 or a.get("NAME1")
 
+        # Resolve externalClientId priority:
+        # 1) global value (if provided)
+        # 2) mapping by LIFNR (if present)
+        # 3) mapping by any subsidiary BUKRS (first hit) (if present)
+        resolved_ecid = None
+        if global_external_client_id:
+            resolved_ecid = global_external_client_id.strip()
+        elif lifnr in lifnr_to_client:
+            resolved_ecid = lifnr_to_client[lifnr]
+        else:
+            # check a subsidiary BUKRS mapping (first match)
+            for sub in subs_map.get(lifnr, []):
+                bukrs = str(sub.get("externalCompanyId","")).strip()
+                if bukrs and bukrs in bukrs_to_client:
+                    resolved_ecid = bukrs_to_client[bukrs]
+                    break
+
         payload = {
             "externalId": lifnr,
-            "code": lifnr,
+            "externalClientId": resolved_ecid or None,   # <-- new
             "companyName": name1 or None,
             "nameAlternative1": alt1 or None,
             "nameAlternative2": alt2 or None,
             "nameAlternative3": alt3 or None,
-            # you can add nameAlternative4 from another source if needed
             "address": stras or None,
             "city": city or None,
             "postcode": post or None,
             "country": ctry or None,
-            "taxIds": [stcd1] if stcd1 else [],
-            "vatIds": [stceg] if stceg else [],
+            "taxIds": tax_ids,
+            "vatIds": vat_ids,
             "supplierSubsidiaries": subs_map.get(lifnr, []),
             "supplierBankAccounts": bank_map.get(lifnr, []),
         }
 
-        payloads.append(prune_empty(payload))
+
+        payloads = build_supplier_payloads(
+                    lfa1, lfb1, lfbk, tiban, adrc,
+                    alt_name_source=alt_source_key,
+                    global_external_client_id=global_external_client_id,
+                    lifnr_to_client=lifnr_to_client,
+                    bukrs_to_client=bukrs_to_client,
+                    )
 
     return payloads
 
@@ -310,6 +339,49 @@ def render_suppliers_page():
     tiban = load_table(tiban_file) if tiban_file else None
     adrc  = load_table(adrc_file)  if adrc_file  else None
 
+    # --- External Client ID options ---
+    st.markdown("#### External Client ID")
+    ec_col1, ec_col2 = st.columns([1,1])
+    with ec_col1:
+        global_external_client_id = st.text_input(
+            "Global externalClientId (optional)",
+            placeholder="EXTERNAL_CLIENT_ID",
+            help="If provided, this value will be set on every supplier payload."
+        )
+    with ec_col2:
+        mapping_file = st.file_uploader(
+            "Optional mapping file (CSV/XLSX)",
+            type=["csv","xlsx","xls"],
+            help="Two-column file to map either LIFNR→externalClientId or BUKRS→externalClientId."
+        )
+        mapping_key_type = st.selectbox(
+            "Mapping key type",
+            options=["LIFNR", "BUKRS"],
+            index=0,
+            help="Choose whether your mapping file keys by vendor (LIFNR) or company code (BUKRS)."
+        )
+
+    # Load mapping (if any)
+    lifnr_to_client = {}
+    bukrs_to_client = {}
+    if mapping_file is not None:
+        mdf = load_table(mapping_file)
+        # Try to locate columns robustly
+        cols = {c.lower(): c for c in mdf.columns}
+        key_col = cols.get(mapping_key_type.lower(), mapping_key_type)
+        val_col = cols.get("externalclientid", "externalClientId")
+
+        if key_col not in mdf.columns or val_col not in mdf.columns:
+            st.error(f"Mapping file must contain columns '{mapping_key_type}' and 'externalClientId'. Found: {list(mdf.columns)}")
+        else:
+            if mapping_key_type == "LIFNR":
+                lifnr_to_client = {str(r[key_col]).strip(): str(r[val_col]).strip()
+                                   for _, r in mdf.iterrows() if str(r.get(val_col,"")).strip()}
+            else:
+                bukrs_to_client = {str(r[key_col]).strip(): str(r[val_col]).strip()
+                                   for _, r in mdf.iterrows() if str(r.get(val_col,"")).strip()}
+
+    
     st.markdown("#### Previews")
     st.write("LFA1:", lfa1.head(10))
     if lfb1 is not None: st.write("LFB1:", lfb1.head(10))
