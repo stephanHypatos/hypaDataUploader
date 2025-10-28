@@ -239,7 +239,7 @@ def build_supplier_payloads(
         payload = {
             "externalId": lifnr,                         # <-- externalId (from LIFNR)
             "externalClientId": (external_client_id or None),
-            "companyName": name1 or None,
+            "name": name1 or None,
             "nameAlternative1": alt1 or None,
             "nameAlternative2": alt2 or None,
             "nameAlternative3": alt3 or None,
