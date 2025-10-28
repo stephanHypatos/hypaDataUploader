@@ -247,8 +247,8 @@ def build_supplier_payloads(
             "city": city or None,
             "postcode": post or None,
             "country": ctry or None,
-            "taxIds": tax_ids,                           # <-- now lists
-            "vatIds": vat_ids,                           # <-- now lists
+            "taxIds": [{"taxId": t} for t in tax_ids] if tax_ids else [],
+            "vatIds": [{"vatId": v} for v in vat_ids] if vat_ids else [],                        
             "supplierSubsidiaries": subs_map.get(lifnr, []),
             "supplierBankAccounts": bank_map.get(lifnr, []),
         }
