@@ -145,7 +145,7 @@ def build_company_payloads(
         payload = {
             "externalId": bukrs,
             "externalClientId": (external_client_id or None),
-            "companyName": name or None,
+            "name": name or None,
             "nameAlternative1": alt1 or None,
             "nameAlternative2": alt2 or None,
             "nameAlternative3": alt3 or None,
