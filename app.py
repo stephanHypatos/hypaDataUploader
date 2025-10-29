@@ -4,7 +4,7 @@ import streamlit as st
 from helpers import (
     DEFAULT_BASE_URL,
     AUTH_PATH,
-    ENRICHMENT_INSERT_PATH,
+    INVOICES_INSERT_PATH,
     ensure_token,
 )
 
