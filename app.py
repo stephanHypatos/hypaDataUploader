@@ -59,7 +59,7 @@ def main():
     # ---- Route to page ----
     if page == "Upload Invoices":
         # Pass the insert path for invoices; other pages build their own endpoint
-        render_invoices_page(insert_path=ENRICHMENT_INSERT_PATH)
+        render_invoices_page(insert_path=INVOICES_INSERT_PATH)
     elif page == "Lookup Tables":
         render_lookup_tables_page()
     elif page == "Ingest Suppliers":
