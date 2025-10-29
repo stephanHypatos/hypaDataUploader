@@ -20,8 +20,10 @@ from io import BytesIO
 # =========================
 DEFAULT_BASE_URL = "https://api.cloud.hypatos.ai"
 AUTH_PATH = "/v2/auth/token"
-ENRICHMENT_INSERT_PATH = "/v2/enrichment/invoices"
+INVOICES_INSERT_PATH = "/v2/enrichment/invoices"
 SUPPLIER_INSERT_PATH = "/v2/enrichment/suppliers"
+COMPANY_INSERT_PATH = "/v2/enrichment/companies"
+
 
 # =========================
 # --- Auth
