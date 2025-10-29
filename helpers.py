@@ -1,4 +1,5 @@
 # helpers.py
+
 import io
 import csv
 import json
@@ -8,12 +9,12 @@ import zipfile
 import pandas as pd
 import requests
 import streamlit as st
-
+from io import BytesIO
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta
 from typing import Tuple, List, Dict
-from io import BytesIO
+
 
 # =========================
 # --- Settings (shared)
@@ -135,6 +136,83 @@ def slugify_type(name: str) -> str:
         return ""
     s = name.strip().lower().replace(" ", "_")
     return re.sub(r"[^a-z0-9_]", "", s)
+
+def _df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False)
+    return bio.getvalue()
+
+
+# =========================
+# --- Company Data sample generators (SAP technical column names)
+# =========================
+
+def make_company_samples_technical() -> dict[str, bytes]:
+    """
+    Returns a dict of filename -> bytes:
+      T001_technical_sample.xlsx, ADRC_technical_sample.xlsx, and company_technical_samples.zip
+    """
+    # T001 – Company Code
+    t001 = pd.DataFrame([
+        {
+            "BUKRS": "1000",            # Company code (→ externalId)
+            "BUTXT": "Demo Company DE", # Name
+            "LAND1": "DE",              # Country
+            "ORT01": "BERLIN",          # City
+            "WAERS": "EUR",             # Currency (informational)
+            "ADRNR": "0000003333",      # Address number (optional, for ADRC join)
+            "STCD1": "1122334455",      # Tax number (optional)
+            "STCEG": "DE123456789",     # VAT ID (optional)
+        },
+        {
+            "BUKRS": "2000",
+            "BUTXT": "Demo Company AT",
+            "LAND1": "AT",
+            "ORT01": "SALZBURG",
+            "WAERS": "EUR",
+            "ADRNR": "0000004444",
+            "STCD1": "7788990011",
+            "STCEG": "ATU12345678",
+        },
+    ])
+
+    # ADRC – Address master (optional)
+    adrc = pd.DataFrame([
+        {
+            "ADDRNUMBER": "0000003333",
+            "NAME1": "Demo Company DE",
+            "NAME2": "Demo Co. Deutschland",
+            "STREET": "HAUPTSTR. 10",
+            "CITY1": "BERLIN",
+            "POST_CODE1": "10115",
+            "COUNTRY": "DE",
+        },
+        {
+            "ADDRNUMBER": "0000004444",
+            "NAME1": "Demo Company AT",
+            "NAME2": "Demo Co. Austria",
+            "STREET": "MARKTPLATZ 2",
+            "CITY1": "SALZBURG",
+            "POST_CODE1": "5020",
+            "COUNTRY": "AT",
+        },
+    ])
+
+    files: dict[str, bytes] = {
+        "T001_technical_sample.xlsx": _df_to_xlsx_bytes(t001),
+        "ADRC_technical_sample.xlsx": _df_to_xlsx_bytes(adrc),
+    }
+
+    # Zip
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    files["company_technical_samples.zip"] = zip_buf.getvalue()
+    return files
+
+
 
 # =========================
 # --- Invoice-specific utils (ported 1:1 from your code)
@@ -293,8 +371,7 @@ def make_scenarios_csv_bytes() -> bytes:
     }
 
     rows = []
-    # (unchanged from your code; omitted here for brevity—copy exactly as in your file)
-    # -- BEGIN copy of your four scenarios --
+    
     rows.append({
         **common_header,
         "externalId": "ext-fi-1",
@@ -397,7 +474,6 @@ def make_scenarios_csv_bytes() -> bytes:
         "externalPurchaseOrderId": "4500000002",
         "purchaseOrderLineNumber": "00020",
     })
-    # -- END copy --
 
     header = [
         "externalId","documentId","supplierInvoiceNumber","invoiceNumber",
@@ -604,14 +680,9 @@ def read_csv_grouped_by_external_id(file_like) -> Dict[str, list]:
         groups[ext].append(row)
     return groups
 
-
-# ---------- Supplier sample generators (SAP technical column names) ----------
-
-def _df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-        df.to_excel(xw, index=False)
-    return bio.getvalue()
+# =========================
+# --- Supplier Data sample generators (SAP technical column names)
+# =========================
 
 def make_supplier_samples_technical() -> dict[str, bytes]:
     """
