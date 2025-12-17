@@ -3,12 +3,12 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from helpers import (
-    load_table,
-    normalize_snake,
-    bearer_headers,
-    ensure_token,
-)
+import helpers
+
+ensure_token = helpers.ensure_token
+bearer_headers = helpers.bearer_headers
+load_table = helpers.load_table
+normalize_snake = helpers.normalize_snake
 
 def _extract_external_ids(df: pd.DataFrame) -> list[str]:
     # Accept common column names
