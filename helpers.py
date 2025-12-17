@@ -108,11 +108,14 @@ def load_table(uploaded_file: io.BytesIO) -> pd.DataFrame:
 
     return df.applymap(_normalize)
 
+
+
 def normalize_snake(x: str) -> str:
-    fn = getattr(helpers, "normalize_snake", None)
-    if callable(fn):
-        return fn(x)
-    return (x or "").strip().lower().replace(" ", "_")
+    x = (x or "").strip().lower()
+    x = re.sub(r"\s+", "_", x)
+    x = re.sub(r"[^a-z0-9_]", "_", x)
+    x = re.sub(r"_+", "_", x)
+    return x.strip("_")
 
 def row_to_string_payload(row: pd.Series) -> dict:
     """
