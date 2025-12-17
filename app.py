@@ -12,6 +12,7 @@ from pages.invoices import render_invoices_page
 from pages.lookup_tables import render_lookup_tables_page
 from pages.suppliers import render_suppliers_page 
 from pages.companies import render_companies_page
+from pages.delete_records import render_delete_records_page
 
 def main():
     st.set_page_config(page_title="Hypatos Uploader", page_icon="🧾", layout="centered")
@@ -51,7 +52,8 @@ def main():
                 "Upload Invoices",
                 "Lookup Tables",
                 "Ingest Suppliers",
-                "Ingest Companies"
+                "Ingest Companies",
+                "Delete Records"
             ],
             index=0,
         )
@@ -66,6 +68,8 @@ def main():
         render_suppliers_page()
     elif page == "Ingest Companies":
         render_companies_page()
+    elif page == "Delete Records":
+        render_delete_records_page()
     else:
         st.info("Page not implemented yet.")
 
