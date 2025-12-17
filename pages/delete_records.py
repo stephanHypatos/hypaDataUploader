@@ -136,49 +136,69 @@ def render_delete_records_page():
     can_run = confirm_checkbox and (confirm_text.strip().upper() == "DELETE")
 
     # --- Execute ---
-    if st.button(f"Delete {len(external_ids)} record(s)", disabled=not can_run):
-        if dry_run:
-            st.info("Dry run enabled — no DELETE calls sent.")
-            return
+if st.button(f"Delete {len(external_ids)} record(s)", disabled=not can_run):
+    if dry_run:
+        st.info("Dry run enabled — no DELETE calls sent.")
+        return
 
-        ensure_token()  # your existing auth refresh
-        headers = bearer_headers()
+    # --- Auth (matches helpers.ensure_token + helpers.bearer_headers signatures) ---
+    base_url = st.session_state.get("base_url", "").strip()
+    client_id = st.session_state.get("client_id", "").strip()
+    client_secret = st.session_state.get("client_secret", "").strip()
+    auth_path = st.session_state.get("auth_path", "/oauth/token")
 
-        results = []
-        base_url = st.session_state.get("base_url", "").rstrip("/")
+    if not base_url or not client_id or not client_secret:
+        st.error("Missing Base URL / Client ID / Client Secret. Please configure them first.")
+        st.stop()
 
-        for i, ext_id in enumerate(external_ids, start=1):
-            path = endpoint_template.format(type=table_type or "", externalId=ext_id)
-            url = f"{base_url}{path}"
+    ok, msg = ensure_token(base_url, client_id, client_secret, auth_path=auth_path)
+    if not ok:
+        st.error(f"Auth failed: {msg}")
+        st.stop()
 
-            try:
-                r = requests.delete(url, headers=headers, timeout=60)
-                ok = 200 <= r.status_code < 300
-                results.append({
-                    "externalId": ext_id,
-                    "url": url,
-                    "status": r.status_code,
-                    "ok": ok,
-                    "response": (r.text or "")[:5000],
-                })
-            except Exception as e:
-                results.append({
-                    "externalId": ext_id,
-                    "url": url,
-                    "status": None,
-                    "ok": False,
-                    "response": str(e),
-                })
+    token = st.session_state.get("token")
+    if not token:
+        st.error("No token in session state after auth. Please retry.")
+        st.stop()
 
-            if throttle_ms and i < len(external_ids):
-                time.sleep(throttle_ms / 1000.0)
+    headers = bearer_headers(token)
 
-        out_df = pd.DataFrame(results)
-        st.subheader("Results")
-        st.dataframe(out_df, use_container_width=True)
+    # --- Execute deletes ---
+    results = []
+    base_url = base_url.rstrip("/")
 
-        failed = out_df[~out_df["ok"]]
-        if len(failed):
-            st.error(f"{len(failed)} deletion(s) failed.")
-        else:
-            st.success("All deletions returned 2xx.")
+    for i, ext_id in enumerate(external_ids, start=1):
+        path = endpoint_template.format(type=table_type or "", externalId=ext_id)
+        url = f"{base_url}{path}"
+
+        try:
+            r = requests.delete(url, headers=headers, timeout=60)
+            ok = 200 <= r.status_code < 300
+            results.append({
+                "externalId": ext_id,
+                "url": url,
+                "status": r.status_code,
+                "ok": ok,
+                "response": (r.text or "")[:5000],
+            })
+        except Exception as e:
+            results.append({
+                "externalId": ext_id,
+                "url": url,
+                "status": None,
+                "ok": False,
+                "response": str(e),
+            })
+
+        if throttle_ms and i < len(external_ids):
+            time.sleep(throttle_ms / 1000.0)
+
+    out_df = pd.DataFrame(results)
+    st.subheader("Results")
+    st.dataframe(out_df, use_container_width=True)
+
+    failed = out_df[~out_df["ok"]]
+    if len(failed):
+        st.error(f"{len(failed)} deletion(s) failed.")
+    else:
+        st.success("All deletions returned 2xx.")
