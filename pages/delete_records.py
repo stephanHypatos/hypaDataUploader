@@ -1,10 +1,14 @@
 import time
 import pandas as pd
-import streamlit as st
 import requests
+import streamlit as st
 
-from helpers import ensure_token, bearer_headers, load_table, normalize_snake  # keep if you already have these
-
+from helpers import (
+    load_table,
+    normalize_snake,
+    bearer_headers,
+    ensure_token,
+)
 
 def _extract_external_ids(df: pd.DataFrame) -> list[str]:
     # Accept common column names
