@@ -63,40 +63,41 @@ def render_delete_records_page():
 
     type_mode = "{type}" in endpoint_template
     table_type = None
-
+    
     if type_mode:
-    st.subheader("Lookup table type")
+        st.subheader("Lookup table type")
 
-    TYPE_OPTIONS = {
-        "Payment terms": "payment_terms",
-        "Tax codes": "tax_codes",
-        "Custom (free input)": "__custom__",
-    }
-
-    selected_label = st.selectbox(
-        "Select type",
-        options=list(TYPE_OPTIONS.keys()),
-        index=0,
-        help="Choose a known lookup table type or enter a custom one",
-    )
-
-    selected_value = TYPE_OPTIONS[selected_label]
-
-    if selected_value == "__custom__":
-        table_type = st.text_input(
-            "Custom type",
-            placeholder="e.g. withholding_tax, gl_accounts, cost_centers",
+        TYPE_OPTIONS = {
+            "Payment terms": "payment_terms",
+            "Tax codes": "tax_codes",
+            "Custom (free input)": "__custom__",
+        }
+    
+        selected_label = st.selectbox(
+            "Select type",
+            options=list(TYPE_OPTIONS.keys()),
+            index=0,
+            help="Choose a known lookup table type or enter a custom one",
         )
+    
+        selected_value = TYPE_OPTIONS[selected_label]
+    
+        if selected_value == "__custom__":
+            table_type = st.text_input(
+                "Custom type",
+                placeholder="e.g. withholding_tax, gl_accounts, cost_centers",
+            )
+        else:
+            table_type = selected_value
+    
+        # final normalization (safe even if helpers.normalize_snake is missing)
+        table_type = normalize_snake(table_type)
+    
+        if not table_type:
+            st.error("Table type must not be empty.")
+            st.stop()
     else:
-        table_type = selected_value
-
-    # final normalization (safe even if helpers.normalize_snake is missing)
-    table_type = normalize_snake(table_type)
-
-    if not table_type:
-        st.error("Table type must not be empty.")
-        st.stop()
-
+        table_type = ""  # so .format(type=...) won't break if someone removed {type}
 
     throttle_ms = st.number_input("Throttle (ms) between DELETE calls", min_value=0, value=0, step=50)
     dry_run = st.checkbox("Dry run (do not call DELETE)", value=False)
